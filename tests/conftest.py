@@ -24,6 +24,7 @@ class MockLLMProvider(LLMProvider):
         self,
         operator_notes: List[str],
         battery_capacity_kwh: float,
+        feedback: Optional[str] = None,
     ) -> List[dict]:
         self.call_history.append((operator_notes, battery_capacity_kwh))
         if self._canned_responses is not None:

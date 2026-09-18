@@ -1,7 +1,7 @@
 """Abstract base class for LLM providers."""
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 
 class LLMProvider(ABC):
@@ -12,19 +12,16 @@ class LLMProvider(ABC):
         self,
         operator_notes: List[str],
         battery_capacity_kwh: float,
+        feedback: Optional[str] = None,
     ) -> List[dict]:
         """
-        Interpret operator notes into structured directive dictionaries.
+        Interpret operator notes into raw directive dictionaries (one per note).
 
-        Args:
-            operator_notes: List of 1-3 natural-language operator notes.
-            battery_capacity_kwh: Battery capacity for percentage conversion.
-
-        Returns:
-            List of directive interpretation dicts, one per note.
+        `feedback`, when given, lists problems found in the previous answer so the
+        model can correct itself.
 
         Raises:
-            LLMError: If the LLM call fails.
+            LLMError: If the call fails.
         """
         ...
 
@@ -32,3 +29,11 @@ class LLMProvider(ABC):
 class LLMError(Exception):
     """Raised when an LLM call fails."""
     pass
+
+
+class RateLimitError(LLMError):
+    """HTTP 429 from the provider. retry_after is in seconds when the API says so."""
+
+    def __init__(self, message: str, retry_after: float = None):
+        super().__init__(message)
+        self.retry_after = retry_after

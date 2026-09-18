@@ -8,7 +8,11 @@ from app.schemas.directives import DirectiveType, ParsedDirective
 logger = logging.getLogger(__name__)
 
 
-def parse_llm_output(raw_interpretations: List[dict], num_notes: int) -> List[ParsedDirective]:
+def parse_llm_output(
+    raw_interpretations: List[dict],
+    num_notes: int,
+    battery_capacity_kwh: Optional[float] = None,
+) -> List[ParsedDirective]:
     """
     Parse raw LLM JSON output into ParsedDirective objects.
 
@@ -31,7 +35,7 @@ def parse_llm_output(raw_interpretations: List[dict], num_notes: int) -> List[Pa
             }
 
         try:
-            directive = _parse_single(raw, i)
+            directive = _parse_single(raw, i, battery_capacity_kwh)
             directives.append(directive)
         except Exception as e:
             logger.warning(f"Failed to parse interpretation for note {i}: {e}")
@@ -49,7 +53,7 @@ def parse_llm_output(raw_interpretations: List[dict], num_notes: int) -> List[Pa
     return directives
 
 
-def _parse_single(raw: dict, expected_index: int) -> ParsedDirective:
+def _parse_single(raw: dict, expected_index: int, battery_capacity_kwh: Optional[float] = None) -> ParsedDirective:
     """Parse a single raw interpretation dict."""
     if not isinstance(raw, dict):
         raise ValueError(f"Expected dict, got {type(raw).__name__}")
@@ -63,7 +67,7 @@ def _parse_single(raw: dict, expected_index: int) -> ParsedDirective:
             note_index = expected_index
 
     # Extract directive_type
-    dtype_str = raw.get("directive_type", "no_op")
+    dtype_str = raw.get("directive_type") or "no_op"
     if not isinstance(dtype_str, str):
         dtype_str = str(dtype_str)
 
@@ -85,6 +89,8 @@ def _parse_single(raw: dict, expected_index: int) -> ParsedDirective:
     else:
         applies = True
         structured_adjustment = raw.get("structured_adjustment")
+        if not isinstance(structured_adjustment, dict):
+            structured_adjustment = _assemble_adjustment(raw, directive_type, battery_capacity_kwh)
 
     # Extract explanation
     explanation = raw.get("explanation", "")
@@ -98,3 +104,25 @@ def _parse_single(raw: dict, expected_index: int) -> ParsedDirective:
         structured_adjustment=structured_adjustment,
         explanation=explanation,
     )
+
+
+def _assemble_adjustment(raw: dict, dtype: DirectiveType, capacity: Optional[float]) -> Optional[dict]:
+    """Build the official structured_adjustment from the flat fields the LLM returns.
+
+    Only the official keys are copied, so extra fields never leak into the response.
+    Percent-of-capacity reserves are converted here, in code, not by the model.
+    """
+    hours = raw.get("hours")
+    if dtype == DirectiveType.SOLAR_REDUCTION:
+        return {"hours": hours, "factor": raw.get("factor")}
+    if dtype == DirectiveType.MINIMUM_BATTERY_RESERVE:
+        value = raw.get("reserve_value", raw.get("minimum_energy_kwh"))
+        unit = str(raw.get("reserve_unit") or "kwh").lower()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and unit.startswith("percent"):
+            value = value / 100.0 * capacity if capacity is not None else None
+        return {"hours": hours, "minimum_energy_kwh": value}
+    if dtype == DirectiveType.MAX_GRID_WINDOW:
+        return {"hours": hours, "max_grid_kwh": raw.get("max_grid_kwh")}
+    if dtype in (DirectiveType.NO_CHARGE_WINDOW, DirectiveType.NO_DISCHARGE_WINDOW):
+        return {"hours": hours}
+    return None

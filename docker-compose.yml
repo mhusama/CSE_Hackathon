@@ -8,8 +8,9 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-open-mistral-nemo}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-mistral-small-latest}
       - PORT=8000
       - LOG_LEVEL=${LOG_LEVEL:-info}
     env_file:

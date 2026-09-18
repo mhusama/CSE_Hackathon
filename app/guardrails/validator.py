@@ -1,9 +1,12 @@
 """Deterministic guardrail validation for LLM-produced directives."""
 
+import copy
 import logging
 import math
-from typing import List
+import re
+from typing import Dict, List, Optional
 
+from app.guardrails.timeparse import extract_windows
 from app.schemas.directives import DirectiveType, ParsedDirective
 
 logger = logging.getLogger(__name__)
@@ -133,6 +136,14 @@ def _validate_hours(hours, note_index: int) -> List[int]:
     if not isinstance(hours, list) or len(hours) == 0:
         raise GuardrailError(f"Note {note_index}: hours must be a non-empty list")
 
+    # "until midnight" is sometimes returned as hour 24. Windows are end-exclusive,
+    # so 24 is never a valid member: drop it instead of losing the whole directive.
+    if any(isinstance(h, (int, float)) and h == 24 for h in hours):
+        logger.warning(f"Note {note_index}: dropping hour 24 from {hours}")
+        hours = [h for h in hours if not (isinstance(h, (int, float)) and h == 24)]
+        if not hours:
+            raise GuardrailError(f"Note {note_index}: hours only contained 24")
+
     int_hours = []
     for h in hours:
         if not isinstance(h, (int, float)):
@@ -222,3 +233,121 @@ def _make_no_op(directive: ParsedDirective) -> ParsedDirective:
     directive.structured_adjustment = None
     directive.explanation = f"Guardrail fallback: {directive.explanation}"
     return directive
+
+
+# ---------------------------------------------------------------------------
+# Strict checks used by the interpreter to decide "retry the LLM with feedback"
+# ---------------------------------------------------------------------------
+
+_NUM_RE = re.compile(r"(?<![\w.])(\d+(?:,\d{3})*(?:\.\d+)?)")
+
+
+def _numbers_in(text: str) -> List[float]:
+    out = []
+    for m in _NUM_RE.finditer(text):
+        try:
+            out.append(float(m.group(1).replace(",", "")))
+        except ValueError:
+            pass
+    return out
+
+
+def _close(a: float, b: float, tol: float = 0.011) -> bool:
+    return abs(a - b) <= max(tol, 1e-6 * max(abs(a), abs(b)))
+
+
+def check_directive(directive: ParsedDirective, battery_capacity_kwh: float) -> Optional[str]:
+    """Return a human-readable problem with this directive, or None if it is fine.
+
+    Works on a copy: the directive passed in is not changed.
+    """
+    d = copy.deepcopy(directive)
+    if d.directive_type == DirectiveType.NO_OP:
+        return None
+    adj = d.structured_adjustment
+    if not isinstance(adj, dict):
+        return f"{d.directive_type.value} needs a structured_adjustment object"
+    try:
+        if d.directive_type == DirectiveType.SOLAR_REDUCTION:
+            _validate_solar_reduction(adj, d.note_index)
+        elif d.directive_type == DirectiveType.MINIMUM_BATTERY_RESERVE:
+            _validate_min_reserve(adj, d.note_index, battery_capacity_kwh)
+        elif d.directive_type in (DirectiveType.NO_CHARGE_WINDOW, DirectiveType.NO_DISCHARGE_WINDOW):
+            _validate_hours_only(adj, d.note_index)
+        elif d.directive_type == DirectiveType.MAX_GRID_WINDOW:
+            _validate_max_grid(adj, d.note_index)
+    except GuardrailError as e:
+        return str(e)
+    return None
+
+
+def check_grounding(note: str, directive: ParsedDirective, battery_capacity_kwh: float) -> Optional[str]:
+    """Cheap sanity check of the LLM output against the note text.
+
+    It only complains when the evidence is clear, so a retry is not wasted on
+    notes written with number words ("one-fifth", "half").
+    """
+    if directive.directive_type == DirectiveType.NO_OP or not isinstance(directive.structured_adjustment, dict):
+        return None
+    adj = directive.structured_adjustment
+    low = note.lower()
+    nums = _numbers_in(note)
+    problems = []
+
+    # 1. hours vs the one clear time window in the note
+    hours = adj.get("hours")
+    windows = [w for w in extract_windows(note) if w.confident]
+    if isinstance(hours, list) and len(windows) == 1:
+        try:
+            got = sorted(set(int(h) for h in hours if h != 24))
+        except (TypeError, ValueError):
+            got = None
+        if got is not None and got != windows[0].hours:
+            problems.append(
+                f"the note contains one clear time window that maps to hours {windows[0].hours} "
+                f"(start inclusive, end exclusive), but you returned {got}"
+            )
+
+    # 2. numbers
+    if directive.directive_type == DirectiveType.SOLAR_REDUCTION and ("%" in note or "percent" in low):
+        f = adj.get("factor")
+        if isinstance(f, (int, float)):
+            remain, cut = f * 100, (1 - f) * 100
+            if not any(_close(remain, n, 0.6) or _close(cut, n, 0.6) for n in nums):
+                problems.append(
+                    f"the note gives a percentage but factor {f} does not match it "
+                    "(factor is the fraction that REMAINS: 80% reduction -> 0.2)"
+                )
+    elif directive.directive_type in (DirectiveType.MINIMUM_BATTERY_RESERVE, DirectiveType.MAX_GRID_WINDOW):
+        key = "minimum_energy_kwh" if directive.directive_type == DirectiveType.MINIMUM_BATTERY_RESERVE else "max_grid_kwh"
+        val = adj.get(key)
+        if isinstance(val, (int, float)):
+            has_kwh = bool(re.search(r"\bk\s?wh\b", low)) or "kilowatt" in low
+            has_pct = "%" in note or "percent" in low
+            has_mwh = bool(re.search(r"\bmwh\b", low))
+            if not has_mwh and (has_kwh or has_pct):
+                ok = any(_close(val, n) for n in nums)
+                if has_pct and battery_capacity_kwh:
+                    ok = ok or any(_close(val, n / 100.0 * battery_capacity_kwh) for n in nums)
+                if not ok:
+                    problems.append(
+                        f"{key}={val} does not match the numbers in the note {nums} "
+                        f"(battery capacity is {battery_capacity_kwh} kWh; convert percentages of capacity to kWh)"
+                    )
+    return "; ".join(problems) if problems else None
+
+
+def find_problems(
+    directives: List[ParsedDirective],
+    notes: List[str],
+    battery_capacity_kwh: float,
+) -> Dict[int, str]:
+    """note_index -> problem text, for every directive that fails a strict check."""
+    problems: Dict[int, str] = {}
+    for i, d in enumerate(directives):
+        msg = check_directive(d, battery_capacity_kwh)
+        if msg is None and i < len(notes):
+            msg = check_grounding(notes[i], d, battery_capacity_kwh)
+        if msg:
+            problems[i] = msg
+    return problems

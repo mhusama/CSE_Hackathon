@@ -1,0 +1,17 @@
+# Render blueprint: New > Blueprint > pick this repo. Set MISTRAL_API_KEY in the dashboard (never commit it).
+# Free instances sleep when idle and can take longer than 60 s to wake up, so use a paid always-on
+# instance (or Railway / Cloud Run with min instances = 1) for the judging window.
+services:
+  - type: web
+    name: gridwise-energy-api
+    runtime: docker
+    healthCheckPath: /health
+    envVars:
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: open-mistral-nemo
+      - key: LLM_FALLBACK_MODEL
+        value: mistral-small-latest
+      - key: PORT
+        value: "8000"

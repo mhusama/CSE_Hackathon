@@ -6,53 +6,38 @@
 
 ## 1. Overview & System Architecture
 
-GridWise is an automated, production-grade energy scheduling service developed for the BUP CSE Fest 2026 Hackathon. It bridges natural-language campus operator directives with mathematical linear programming to minimize 24-hour campus grid electricity costs while maintaining 100% physical and operational constraint validity.
+GridWise turns natural-language campus operator notes into structured directives with an LLM, checks them with deterministic guardrails, and then solves the 24-hour schedule as a linear program (exact minimum grid cost).
 
 ```
-                  POST /optimize-energy
-                            │
-                            ▼
-              ┌───────────────────────────┐
-              │  FastAPI Schema & Checks  │
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-              ┌───────────────────────────┐
-              │  LLM Directive Extraction │ (Google Gemini 2.0 Flash)
-              │  Single batch JSON call   │
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-              ┌───────────────────────────┐
-              │  Deterministic Guardrails │ (Validation, clamping, safe fallback)
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-              ┌───────────────────────────┐
-              │    OR-Tools LP Solver     │ (Exact linear cost minimization)
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-              ┌───────────────────────────┐
-              │ Deterministic Post-Replay │ (100% hour-by-hour constraint verification)
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-                 JSON Response (200 OK)
+POST /optimize-energy
+   |
+   v
+FastAPI schema checks (400 on malformed input, always before any LLM work)
+   |
+   v
+LLM interpretation (Mistral chat API, JSON mode, temperature 0)
+   |  retry with feedback if guardrail/grounding checks find a problem
+   |  fail over to a second model if the first keeps failing
+   |  in-memory cache for identical notes + battery capacity
+   |  emergency rule parser ONLY if every LLM call failed (never a 500)
+   v
+Deterministic guardrails (types, hours, ranges, applies semantics, hour-24 repair)
+   v
+OR-Tools GLOP LP (exact optimum). If directives make it infeasible, the
+   least-costly conflicting directive is relaxed and reported in plan_summary
+   v
+Replay validator (hour-by-hour re-check of every rule and directive)
+   v
+JSON response
 ```
 
-### Key Architectural Pillars:
-1. **LLM Directive Interpretation**: Uses Google Gemini (`gemini-2.0-flash` by default) via the official `google-genai` SDK with native JSON structured output. All 1–3 operator notes are interpreted in a single batch request to minimize latency and token usage.
-2. **Deterministic Guardrails**: Untrusted LLM outputs are rigorously validated:
-   - Directive types restricted strictly to the 6 allowed enums.
-   - Applies semantics enforced (`no_op` ↔ `false`, all others ↔ `true`).
-   - Hours validated to unique integers `0..23` in ascending order with start-inclusive/end-exclusive windowing.
-   - Factors validated within `[0.0, 1.0]`.
-   - Battery reserve validated within `[0, capacity]`.
-   - Grid import caps validated as finite and non-negative.
-   - Any unfixable malformed LLM directive falls back deterministically to safe `no_op`.
-3. **Exact Mathematical Optimization**: Uses Google OR-Tools GLOP Linear Programming solver. Solves in milliseconds with global mathematical optimality for cost minimization.
-4. **Post-Solve Replay Validator**: Replays the entire 24-hour schedule hour-by-hour verifying energy balance, battery state transitions, battery bounds, charge/discharge rates, solar usage limits, directive constraints, and end-of-day battery neutrality.
+### Key pillars
+
+1. **LLM directive interpretation.** Every note is read by a Mistral model (`LLM_MODEL`, default `open-mistral-nemo`) through the Mistral REST API (`/v1/chat/completions`, JSON mode, called with `httpx`). The model returns flat JSON entries (hours, factor, reserve value + unit, grid cap). The code builds the official `structured_adjustment` from it, so extra fields never leak, and percent-of-capacity reserves are converted to kWh in code, not by the model. All notes go in one call to keep latency low.
+2. **Self-correction.** The guardrails plus a grounding check (numbers in the note vs extracted values, one clear time window vs returned hours) can send the model a list of problems and ask again, instead of silently dropping the directive.
+3. **Reliability.** Per-call timeout (`LLM_TIMEOUT_SECONDS`) and a total budget (`LLM_TOTAL_BUDGET_SECONDS`) are enforced. After the primary model fails, `LLM_FALLBACK_MODEL` is tried. If every LLM call fails, a small rule-based parser keeps the service answering; the response `plan_summary` says so. This parser is a fallback only, the LLM is always tried first.
+4. **Exact optimization.** OR-Tools GLOP linear programming, solved in milliseconds.
+5. **Post-solve replay.** Energy balance, battery transitions and bounds, rate limits, solar limits, all directives and end-of-day neutrality are re-checked before responding.
 
 ---
 
@@ -71,33 +56,36 @@ GridWise is an automated, production-grade energy scheduling service developed f
 
 ## 3. Environment Variables & Configuration
 
-Configuration is managed via environment variables or a `.env` file in the root directory:
+Set them in the environment or in a `.env` file (template: `.env.example`). Never commit real keys.
 
 | Variable | Description | Default | Required |
-|---|---|---|---|
-| `GEMINI_API_KEY` | Google Gemini API key (free from [Google AI Studio](https://aistudio.google.com)) | `""` | Yes (for live LLM) |
-| `LLM_MODEL` | Gemini model name | `gemini-2.0-flash` | No |
-| `PORT` | HTTP server port | `8000` | No |
-| `LOG_LEVEL` | Logging verbosity (`debug`, `info`, `warning`, `error`) | `info` | No |
-| `SOLVER_TIMEOUT_SECONDS` | Solver timeout limit | `25.0` | No |
-| `LLM_TIMEOUT_SECONDS` | Gemini API call timeout | `20.0` | No |
-| `LLM_MAX_RETRIES` | Retries with backoff for Gemini API | `2` | No |
+| --- | --- | --- | --- |
+| `MISTRAL_API_KEY` | Mistral API key ([console.mistral.ai](https://console.mistral.ai), free Experiment tier works) | `""` | Yes |
+| `LLM_MODEL` | Primary Mistral model | `open-mistral-nemo` | No |
+| `LLM_FALLBACK_MODEL` | Used if the primary keeps failing | `mistral-small-latest` | No |
+| `LLM_TIMEOUT_SECONDS` | Hard limit for one Mistral call | `10` | No |
+| `MISTRAL_MIN_INTERVAL_SECONDS` | Minimum gap between Mistral calls (free-tier rate limit); `0` = off | `1.1` | No |
+| `LLM_MAX_RETRIES` | Attempts per model (later attempts carry feedback) | `2` | No |
+| `LLM_TOTAL_BUDGET_SECONDS` | Whole interpretation step limit (judge limit is 30 s) | `22` | No |
+| `LLM_CACHE_SIZE` | Cached interpretations | `512` | No |
+| `PORT` | HTTP port | `8000` | No |
+| `LOG_LEVEL` | `debug`, `info`, `warning`, `error` | `info` | No |
 
-Template is available in `.env.example`.
+The `-latest` aliases follow Mistral's current model of that size. For higher accuracy at more latency, set `LLM_MODEL=mistral-large-latest`. Free-tier rate limits are not published exactly (see the Limits page in the Mistral console), so check them before judging.
 
 ---
 
 ## 4. Local Quickstart (Clean Environment)
 
 ### Prerequisites
-- Python 3.10+ (tested on Python 3.11, 3.12, and 3.14)
+- Python 3.10+ (tests run on 3.12; the Docker image uses 3.11)
 - Git
 
 ### Step-by-Step Setup:
 
 #### 1. Clone Repository
 ```bash
-git clone <REPO_URL>
+git clone https://github.com/mhusama/CSE_Hackathon.git
 cd CSE_Hackathon
 ```
 
@@ -144,10 +132,10 @@ Copy the template configuration to create your `.env` file:
   cp .env.example .env
   ```
 
-Open `.env` in any text editor and insert your Gemini API key (free from [Google AI Studio](https://aistudio.google.com)):
+Open `.env` in any text editor and insert your Mistral API key (free from [console.mistral.ai](https://console.mistral.ai)):
 ```dotenv
-GEMINI_API_KEY=AIzaSy...your_actual_key_here
-LLM_MODEL=gemini-2.0-flash
+MISTRAL_API_KEY=your_actual_key_here
+LLM_MODEL=open-mistral-nemo
 PORT=8000
 LOG_LEVEL=info
 ```
@@ -174,88 +162,50 @@ Once started, the API is accessible at:
 
 ## 5. Docker Deployment
 
-### Building and Running with Docker:
+### Pull the prebuilt fallback image
 
-```bash
-# Build the Docker image
-docker build -t gridwise-energy-api:latest .
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs the tests, then builds and pushes the image on every push to `master`:
 
-# Run the container
-docker run -d \
-  -p 8000:8000 \
-  -e GEMINI_API_KEY="your_api_key_here" \
-  --name gridwise-service \
-  gridwise-energy-api:latest
 ```
-
-### Or using Docker Compose:
-
-```bash
-# Set GEMINI_API_KEY in .env, then:
-docker-compose up -d --build
-```
-
-### Checking Container Health:
-```bash
-docker ps
+docker pull ghcr.io/mhusama/gridwise-energy-api:latest
+docker run -d -p 8000:8000 -e MISTRAL_API_KEY="your_api_key_here" --name gridwise ghcr.io/mhusama/gridwise-energy-api:latest
 curl http://localhost:8000/health
 ```
 
+Pin an exact version with the commit tag (`:<git sha>`) shown in the workflow run. The package must be set to **public** in GitHub (Packages > gridwise-energy-api > Package settings) so judges can pull it. The image contains no secrets (`.dockerignore` excludes `.env`); the key is passed at run time.
+
+### Build it yourself
+
+```
+docker build -t gridwise-energy-api:latest .
+docker run -d -p 8000:8000 -e MISTRAL_API_KEY="your_api_key_here" --name gridwise-service gridwise-energy-api:latest
+```
+
+Or with Compose (set `MISTRAL_API_KEY` in `.env` first): `docker-compose up -d --build`
+
+The container honours `$PORT`, binds to `0.0.0.0`, and has a health check on `/health`.
+
 ---
 
-## 6. Hosting for Public / Remote Access from Your Own PC
+## 6. Public Deployment (required for judging)
 
-When running GridWise on your local machine and attempting to access it from the public internet (or external judging harnesses), you may encounter connectivity blocks. Here is how to configure and troubleshoot public access:
+The judge must reach `GET /health` and `POST /optimize-energy` for the whole evaluation window, so deploy to an always-on host, not a laptop.
 
-### Common Reasons External Access Fails:
+**Public base URL:** `<PUBLIC_BASE_URL>` (fill in after deploying)
 
-1. **Host Binding (`0.0.0.0` vs `127.0.0.1`):**
-   - Ensure the server is listening on `0.0.0.0` (all interfaces), not `127.0.0.1` / `localhost`.
-   - `uvicorn app.main:app --host 0.0.0.0 --port 8000` already binds to all interfaces.
+Any Docker-capable host works. Two easy routes:
 
-2. **Windows Defender Firewall (Most Common Blocker):**
-   - Windows Firewall blocks unsolicited incoming external connections by default.
-   - Run **PowerShell as Administrator** to allow inbound traffic on port 8000:
-     ```powershell
-     New-NetFirewallRule -DisplayName "FastAPI GridWise Port 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
-     ```
+- **Render:** New > Blueprint > select this repo (`render.yaml` is included). Add `MISTRAL_API_KEY` in the dashboard. Use an always-on instance: free instances sleep and can take longer than 60 s to wake.
+- **Cloud Run / Railway / Fly.io:** deploy the Dockerfile, set `MISTRAL_API_KEY`, keep at least one instance warm.
 
-3. **ISP Carrier-Grade NAT (CGNAT) & Router Port Forwarding:**
-   - Most residential internet providers use CGNAT. Even if you configure port forwarding on your home Wi-Fi router, inbound traffic from the internet cannot reach your machine directly.
+Check from outside your network before submitting:
 
-### Recommended Solutions for Public Access:
+```
+curl https://<PUBLIC_BASE_URL>/health
+curl -X POST https://<PUBLIC_BASE_URL>/optimize-energy -H "Content-Type: application/json" -d @docs/sample_request.json
+```
 
-#### Method A: Free HTTPS Tunnels (Easiest & Most Reliable for Demos / Evaluation)
-Tunnels securely forward public traffic directly to `localhost:8000` without requiring router changes, public IP configuration, or disabling firewalls.
-
-- **Option 1: Cloudflare Tunnel (`cloudflared`) — Free, Fast & Stable**
-  ```bash
-  # Download from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-  cloudflared tunnel --url http://localhost:8000
-  ```
-  *Outputs a public HTTPS URL (e.g. `https://random-name.trycloudflare.com`) that routes directly to your API.*
-
-- **Option 2: ngrok**
-  ```bash
-  # Download from https://ngrok.com
-  ngrok http 8000
-  ```
-  *Provides a public HTTPS URL (e.g. `https://xyz.ngrok-free.app`).*
-
-- **Option 3: LocalTunnel (No account required)**
-  ```bash
-  npx localtunnel --port 8000
-  ```
-
-#### Method B: Direct Port Forwarding (If your router has a dedicated Public IP)
-1. Find your machine's local IP address:
-   ```cmd
-   ipconfig
-   ```
-   *(Look for IPv4 Address, e.g. `192.168.1.150`)*
-2. In your home router settings (`http://192.168.1.1`), open **Port Forwarding**:
-   - Forward external port `8000` to local IP `192.168.1.150:8000` (TCP protocol).
-3. Access via `http://<YOUR_PUBLIC_IP>:8000/health`. Ensure you test from an outside network (such as mobile data).
+Last resort for a quick demo only: a tunnel (`cloudflared tunnel --url http://localhost:8000` or `ngrok http 8000`). Tunnels die when the laptop sleeps or the terminal closes, so do not rely on one for judging.
 
 ---
 
@@ -415,47 +365,23 @@ curl -X POST http://localhost:8000/optimize-energy \
 
 ## 8. Testing & Verification
 
-### Automated Test Suite:
-Run the complete unit and integration test suite:
-```bash
+```
 pytest -v
 ```
-All 22 automated tests verify:
-- API endpoints (`GET /health`, `POST /optimize-energy`, input validation errors)
-- Guardrails for all 6 directive types, clamping, index correction, and safe fallbacks
-- LP optimizer constraints (baseline, solar reduction, charge/discharge windows, reserve, grid caps)
-- Post-solve replay validator (balance, rates, bounds, neutrality, solar limits)
-- **All 10 public sample cases** (achieving exact optimal reference cost)
 
-### Running Sample Cases Script:
-```bash
-# Test all 10 public sample cases:
-python scripts/run_sample_cases.py
+The 39 automated tests cover: API endpoints and status codes (including 400 before any LLM work and a valid answer with no API key), guardrails for all directive types, hour-24 repair, retry with feedback, per-call timeout enforcement, model failover, cache, the rule-based fallback, infeasible-directive relaxation, the LP optimizer, the replay validator, and the 10 public sample cases.
 
-# Or with live Gemini LLM interpretation (requires GEMINI_API_KEY):
-python scripts/run_sample_cases.py --use-llm
+Note: `test_samples.py` and `python scripts/run_sample_cases.py` feed the **reference** directives to the optimizer, so they verify the optimizer, not the LLM.
+
+### Measure LLM interpretation accuracy (needs a key)
+
+```
+python scripts/eval_interpretation.py           # real Mistral path: 10 sample cases + 30 paraphrase notes
+python scripts/eval_interpretation.py --rules   # emergency fallback parser only, no key
+python scripts/run_sample_cases.py --use-llm    # full pipeline; also compares directives with the reference
 ```
 
-Sample Verification Output:
-```
-=======================================================
-  GridWise Sample Case Verification (Total: 10 cases)
-=======================================================
-Case ID      | Directives     | Calc Cost   | Ref Cost    | Diff (BDT)  | Status
----------------------------------------------------------------------------
-SAMPLE-01    | 2              | 38365.00    | 38365.00    | +0.00       | PASS
-SAMPLE-02    | 1              | 42885.00    | 42885.00    | +0.00       | PASS
-SAMPLE-03    | 1              | 35480.00    | 35480.00    | +0.00       | PASS
-SAMPLE-04    | 1              | 40495.00    | 40495.00    | +0.00       | PASS
-SAMPLE-05    | 1              | 33950.00    | 33950.00    | +0.00       | PASS
-SAMPLE-06    | 3              | 34090.00    | 34090.00    | +0.00       | PASS
-SAMPLE-07    | 2              | 38550.00    | 38550.00    | +0.00       | PASS
-SAMPLE-08    | 2              | 37665.00    | 37665.00    | +0.00       | PASS
-SAMPLE-09    | 2              | 34873.00    | 34873.00    | +0.00       | PASS
-SAMPLE-10    | 3              | 41620.00    | 41620.00    | +0.00       | PASS
----------------------------------------------------------------------------
-Summary: 10/10 PASSED, 0 FAILED.
-```
+The eval prints accuracy for relevance, directive type, hours and values (the same axes the judge scores) and lists every miss. Add your own paraphrases to `tests/data/paraphrases.json`.
 
 ---
 
@@ -464,14 +390,19 @@ Summary: 10/10 PASSED, 0 FAILED.
 - **FastAPI** (`0.115+`) & **Starlette**: High-performance asynchronous REST API framework
 - **Pydantic** (`v2.9+`) & **pydantic-settings**: Strict data validation and schema enforcement
 - **Google OR-Tools** (`v9.11+` / `v9.15+`): Industrial-grade mathematical optimization (GLOP LP solver)
-- **Google GenAI SDK** (`google-genai` `v1.14+` / `v2.24+`): Upstream SDK for Google Gemini models
+- **Mistral AI API** (REST, via **httpx**): LLM for operator-note interpretation
 - **Uvicorn** (`0.30+`): ASGI web server implementation
 - **Pytest** & **pytest-asyncio**: Test runner and async testing utilities
+- **AI coding assistants used during development:** <list the tools you used, as the rulebook requires>
 
 ---
 
-## 10. Limitations & Edge Cases Handled
+## 10. Limitations & Behaviour Worth Knowing
 
-1. **Simultaneous Charging and Discharging**: Linear programming could theoretically set non-zero charge and discharge in degenerate equal-cost scenarios. GridWise automatically nets them prior to building the plan, guaranteeing single-action physical validity.
-2. **LLM Formatting Variance**: If the LLM wraps the response in a container dictionary (e.g. `{"directives": [...]}`), the parser extracts the array automatically. If an individual directive is malformed, guardrails safely clamp values or default to `no_op` rather than crashing the request.
-3. **No-secret guarantee**: No keys or credentials are baked into images, code, or repositories.
+1. **Simultaneous charge/discharge** in degenerate LP ties is netted before the plan is built, so every hour has one valid battery action.
+2. **Guardrails repair or retry, then neutralise.** Hour 24 is dropped; wrong types, factors or numbers trigger a retry with feedback. If the model still returns something invalid, that note becomes `no_op` rather than crashing the request.
+3. **Emergency fallback parser.** Used only when every LLM call fails. It handles common phrasings, not every paraphrase, so accuracy in that mode is lower than with the LLM. The response `plan_summary` states when it was used.
+4. **Infeasible directives are relaxed.** If the interpreted directives cannot all be satisfied together, the cheapest single relaxation that becomes feasible is applied and named in `plan_summary`; `directive_interpretation` still shows what was read. If the scenario is infeasible even with no directives, the API returns 422.
+5. **Bare hours without AM/PM** ("from one until three") are read as afternoon by the model prompt; genuinely ambiguous notes may be misread.
+6. **Provider limits.** Free Mistral keys have rate limits. Use a key with enough quota for the judging window.
+7. **No secrets** are stored in the code, image or repository history.

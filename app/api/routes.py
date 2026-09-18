@@ -1,14 +1,15 @@
 """API routes for GridWise Energy Optimization service."""
 
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.schemas.request import OptimizeRequest
 from app.schemas.response import OptimizeResponse, HealthResponse, ErrorResponse
 from app.services.optimize_service import OptimizeService
-from app.llm.provider import GeminiProvider
+from app.llm.provider import get_mistral_provider
+from app.llm.interpreter import build_interpreter
 from app.llm.base import LLMProvider, LLMError
 from app.optimization.solver import OptimizationError
 from app.validation.replay import ValidationError
@@ -19,23 +20,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_llm_provider() -> LLMProvider:
-    """Dependency provider for the LLM."""
+def get_llm_provider() -> Optional[LLMProvider]:
+    """Shared Mistral provider, or None when no key is configured.
+
+    Never raises: request validation (400) must come before any LLM concern, and a
+    missing/broken key must not turn valid requests into 503s (the interpreter falls
+    back to the emergency parser and logs the problem).
+    """
     try:
-        return GeminiProvider()
+        return get_mistral_provider(get_settings().llm_model)
     except LLMError as e:
-        logger.error(f"Failed to initialize LLM provider: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LLM provider unavailable. Please ensure GEMINI_API_KEY is configured.",
-        )
+        logger.error(f"LLM provider unavailable: {e}")
+        return None
 
 
 def get_optimize_service(
-    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    llm_provider: Annotated[Optional[LLMProvider], Depends(get_llm_provider)],
 ) -> OptimizeService:
     """Dependency provider for OptimizeService."""
-    return OptimizeService(llm_provider=llm_provider)
+    return OptimizeService(interpreter=build_interpreter(llm_provider))
 
 
 @router.get("/health", response_model=HealthResponse)

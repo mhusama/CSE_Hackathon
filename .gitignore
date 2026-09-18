@@ -34,7 +34,6 @@ htmlcov/
 .coverage
 
 # Docker
-.dockerignore
 
 # Docs (extracted)
 docs/*.txt

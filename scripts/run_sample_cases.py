@@ -1,5 +1,9 @@
 """Run and verify all 10 public sample cases.
 
+Without --use-llm this only checks the OPTIMIZER (reference directives are fed in).
+With --use-llm it runs the full pipeline and also compares the interpretation.
+For a full accuracy report use scripts/eval_interpretation.py.
+
 Usage:
     python scripts/run_sample_cases.py [--use-llm]
 """
@@ -40,15 +44,16 @@ async def main():
 
     llm_service = None
     if use_llm:
-        if not settings.gemini_api_key:
-            print("Warning: --use-llm was specified but GEMINI_API_KEY is not set. Falling back to reference directives.\n")
+        if not settings.mistral_api_key:
+            print("Warning: --use-llm was specified but MISTRAL_API_KEY is not set. Falling back to reference directives.\n")
         else:
             try:
-                from app.llm.provider import GeminiProvider
-                llm_service = OptimizeService(llm_provider=GeminiProvider())
-                print(f"Using Gemini LLM model: {settings.llm_model}\n")
+                from app.llm.provider import get_mistral_provider
+                from app.llm.interpreter import build_interpreter
+                llm_service = OptimizeService(interpreter=build_interpreter(get_mistral_provider(settings.llm_model)))
+                print(f"Using Mistral LLM model: {settings.llm_model}\n")
             except Exception as e:
-                print(f"Failed to initialize GeminiProvider: {e}. Falling back to reference directives.\n")
+                print(f"Failed to initialize MistralProvider: {e}. Falling back to reference directives.\n")
 
     passed = 0
     failed = 0
@@ -72,6 +77,11 @@ async def main():
                 calc_cost = response.total_cost_bdt
                 calc_grid = response.total_grid_kwh
                 directives_count = len(response.directive_interpretation)
+                # Interpretation must match the reference too, otherwise a dropped constraint
+                # (cheaper schedule) would look like a pass.
+                got = [(d.directive_type, d.structured_adjustment) for d in response.directive_interpretation]
+                want = [(d["directive_type"], d["structured_adjustment"]) for d in expected["directive_interpretation"]]
+                interp_ok = got == want
             else:
                 # Using reference ground-truth directives
                 directives = [
@@ -87,10 +97,11 @@ async def main():
                 plan = solve_schedule(req, directives)
                 calc_grid, calc_cost, peak_grid = validate_schedule(plan, req, directives)
                 directives_count = len(directives)
+                interp_ok = True  # reference directives were used as-is (optimizer-only check)
 
             diff = round(calc_cost - ref_cost, 2)
-            # Optimal if cost <= ref_cost + 0.05
-            is_valid = (calc_cost <= ref_cost + 0.05)
+            # Two-sided: same cost as the reference AND (with --use-llm) same interpretation
+            is_valid = abs(calc_cost - ref_cost) <= 0.05 and interp_ok
 
             status_str = "PASS" if is_valid else "FAIL"
             if is_valid:
