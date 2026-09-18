@@ -1,0 +1,24 @@
+services:
+  gridwise-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gridwise-energy-api:latest
+    container_name: gridwise-energy-service
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
+      - PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
