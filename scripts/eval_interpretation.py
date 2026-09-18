@@ -6,12 +6,14 @@ Sources of ground truth: the 10 public sample cases + tests/data/paraphrases.jso
 Usage:
     python scripts/eval_interpretation.py            # real Mistral path (needs MISTRAL_API_KEY)
     python scripts/eval_interpretation.py --rules    # emergency fallback parser only, no key needed
+    python scripts/eval_interpretation.py --hard-only  # only the harder 37-note set
 Exit code is 1 if any note is wrong, so it can gate a deploy.
 """
 
 import asyncio
 import json
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -40,9 +42,14 @@ def load_items():
             for d in c["expected_output"]["directive_interpretation"]
         ]
         items.append((c["id"], c["input"]["operator_notes"], c["input"]["battery"]["capacity_kwh"], exp))
-    for k, c in enumerate(json.load(open(ROOT / "tests" / "data" / "paraphrases.json"))["cases"]):
-        items.append((f"PARA-{k:02d}", [c["note"]], c["capacity"],
-                      [{"type": c["type"], "hours": c.get("hours"), "value": c.get("value")}]))
+    files = [("PARA", "paraphrases.json"), ("HARD", "hard_paraphrases.json")]
+    if "--hard-only" in sys.argv:
+        items = []
+        files = files[1:]
+    for tag, fname in files:
+        for k, c in enumerate(json.load(open(ROOT / "tests" / "data" / fname))["cases"]):
+            items.append((f"{tag}-{k:02d}", [c["note"]], c["capacity"],
+                          [{"type": c["type"], "hours": c.get("hours"), "value": c.get("value")}]))
     return items
 
 
@@ -61,10 +68,13 @@ async def main():
         print(f"Model: {s.llm_model} (fallback {s.llm_fallback_model})\n")
 
     sources = Counter()
+    lat = []
     axes = {"relevance": [0, 0], "type": [0, 0], "hours": [0, 0], "value": [0, 0]}
     bad = 0
     for sid, notes, cap, exp in load_items():
+        t0 = time.monotonic()
         res = await interp.interpret(notes, cap)
+        lat.append(time.monotonic() - t0)
         sources[res.source] += 1
         got = validate_directives(res.directives, len(notes), cap)
         for i, (g, e) in enumerate(zip(got, exp)):
@@ -89,6 +99,9 @@ async def main():
     print("\nAccuracy per axis:")
     for a, (k, n) in axes.items():
         print(f"  {a:<10} {k}/{n}  ({100 * k / max(n, 1):.1f}%)")
+    if lat:
+        lat.sort()
+        print(f"\nInterpretation latency per scenario: mean {sum(lat) / len(lat):.2f}s, p95 {lat[int(0.95 * (len(lat) - 1))]:.2f}s, max {lat[-1]:.2f}s")
     print(f"\n{bad} note(s) wrong.")
     sys.exit(1 if bad else 0)
 

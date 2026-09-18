@@ -228,7 +228,9 @@ python scripts/run_sample_cases.py --use-llm
 python scripts/eval_interpretation.py
 ```
 
-The first runs the full pipeline on the 10 public samples and compares both the interpretation and the cost. The second scores interpretation alone on relevance, directive type, hours and values (the same four things the judge checks) and lists every miss. It also prints which source answered each scenario. Add `--rules` to score only the emergency parser, with no key needed.
+The first runs the full pipeline on the 10 public samples and compares both the interpretation and the cost. The second scores interpretation alone on relevance, directive type, hours and values (the same four things the judge checks), lists every miss and reports latency. It also prints which source answered each scenario. Add `--rules` to score only the emergency parser with no key needed, or `--hard-only` to run just the harder 37-note set.
+
+`scripts/check_live.py <url>` is a black-box test for a running server, local or hosted. It checks `/health`, bad input, the 10 samples with latency, and a parallel burst.
 
 ## What I measured
 
@@ -237,7 +239,11 @@ With `open-mistral-nemo` as primary:
 - All 10 public samples matched the reference cost exactly, through the real model. One call timed out at 10 seconds during that run, the retry succeeded, and the case still passed.
 - The interpretation eval covered 40 scenarios and 48 notes: relevance 48/48, type 48/48, hours 37/37, values 24/24.
 
-I would not read too much into that 100%. Eighteen of the 48 notes come from the public samples. The other 30 are paraphrases written for this repo, not taken from the organizers, so they are probably easier than the hidden set. Extra paraphrases go in `tests/data/paraphrases.json`.
+I would not read too much into that 100%. Eighteen of the 48 notes come from the public samples. The other 30 are paraphrases written for this repo, not taken from the organizers, so they are probably easier than the hidden set.
+
+So I wrote a second, harder set of 37 notes (`tests/data/hard_paraphrases.json`) with unusual wording, 24-hour times, "midnight", windows that cross midnight, percentages of capacity, and distractors that mention a time or an energy word without changing anything. One of them is a prompt-injection attempt. Run separately with the same model: relevance 37/37, type 37/37, hours 30/30, values 19/19. Interpretation took a mean of 1.54 s per scenario (p95 2.87 s, max 3.96 s) when measured from my machine.
+
+Both sets were written by me and my assistants, so they can still miss wording the organizers use. Add more notes to either JSON file and rerun the eval.
 
 ## Known limitations
 
