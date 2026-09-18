@@ -178,3 +178,29 @@ def test_429_waits_before_retrying_same_model():
     r = run(make(p).interpret(NOTES, 200))
     assert time.monotonic() - t0 >= 0.39
     assert r.source == "llm:p0" and p.calls == 2
+
+
+def test_inclusive_end_hour_is_repaired_when_retry_does_not_fix_it():
+    notes = ["Cloud cover will leave about half of the forecast solar output from 10 AM until noon.", NOTES[1]]
+    bad = {"note_index": 0, "applies": True, "directive_type": "solar_reduction",
+           "hours": [10, 11, 12], "factor": 0.5, "explanation": "x"}
+    p = Scripted([bad, NO_OP], [bad, NO_OP])
+    r = run(make(p).interpret(notes, 200))
+    assert p.calls == 2  # it did ask again first
+    assert r.directives[0].structured_adjustment["hours"] == [10, 11]
+
+
+def test_throttle_wait_does_not_count_against_call_timeout():
+    """Five parallel requests, 0.25 s apart, 0.4 s per-call limit: all must still succeed."""
+    class Quick(LLMProvider):
+        async def interpret_notes(self, operator_notes, battery_capacity_kwh, feedback=None):
+            await asyncio.sleep(0.05)
+            return [entry(hours=[14, 15]), NO_OP]
+
+    it = NoteInterpreter([("q", Quick())], per_call_timeout=0.4, total_budget=10.0, min_interval=0.25, backoff=0.0)
+
+    async def go():
+        return await asyncio.gather(*[it.interpret([f"Do not charge from 2 PM to 4 PM. {i}", NOTES[1]], 200) for i in range(5)])
+
+    res = asyncio.run(go())
+    assert all(r.source == "llm:q" for r in res)

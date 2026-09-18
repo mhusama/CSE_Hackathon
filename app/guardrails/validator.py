@@ -351,3 +351,28 @@ def find_problems(
         if msg:
             problems[i] = msg
     return problems
+
+
+def fix_inclusive_end(directives: List[ParsedDirective], notes: List[str]) -> List[ParsedDirective]:
+    """Repair the classic slip where the model includes the END hour of a window.
+
+    Only acts when the note holds exactly one clear time window and the model's hours
+    equal that window plus its end hour ("10 AM until noon" -> [10,11,12] instead of [10,11]).
+    Windows are start-inclusive and end-exclusive, so the extra hour is wrong by definition.
+    """
+    for i, d in enumerate(directives):
+        if d.directive_type == DirectiveType.NO_OP or not isinstance(d.structured_adjustment, dict) or i >= len(notes):
+            continue
+        hours = d.structured_adjustment.get("hours")
+        wins = [w for w in extract_windows(notes[i]) if w.confident]
+        if not isinstance(hours, list) or len(wins) != 1 or not wins[0].hours:
+            continue
+        w = wins[0].hours
+        try:
+            got = sorted(set(int(h) for h in hours))
+        except (TypeError, ValueError):
+            continue
+        if got == sorted(set(w + [(w[-1] + 1) % 24])) and got != sorted(w):
+            logger.warning(f"Note {i}: hours {got} include the end hour; corrected to {sorted(w)}")
+            d.structured_adjustment["hours"] = sorted(w)
+    return directives

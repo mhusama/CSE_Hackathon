@@ -1,10 +1,8 @@
 """Mistral provider for operator-note interpretation (REST, JSON mode)."""
 
-import asyncio
 import json
 import logging
 import re
-import time
 from functools import lru_cache
 from typing import List, Optional
 
@@ -18,23 +16,6 @@ logger = logging.getLogger(__name__)
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.I)
 _LIST_KEYS = ("interpretations", "directives", "results", "data", "notes")
-
-
-_gate = {"loop": None, "lock": None, "last": 0.0}
-
-
-async def _throttle(min_interval: float) -> None:
-    """Space out Mistral calls (shared by all models) so bursts do not trigger 429s."""
-    if min_interval <= 0:
-        return
-    loop = asyncio.get_running_loop()
-    if _gate["loop"] is not loop:
-        _gate.update(loop=loop, lock=asyncio.Lock(), last=0.0)
-    async with _gate["lock"]:
-        wait = _gate["last"] + min_interval - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        _gate["last"] = time.monotonic()
 
 
 def _content_text(content) -> str:
@@ -75,7 +56,6 @@ class MistralProvider(LLMProvider):
         if not s.mistral_api_key:
             raise LLMError("MISTRAL_API_KEY environment variable is not set")
         self.model = model or s.llm_model
-        self._min_interval = s.mistral_min_interval_seconds
         self._client = httpx.AsyncClient(
             base_url=s.mistral_base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {s.mistral_api_key}", "Content-Type": "application/json"},
@@ -103,7 +83,6 @@ class MistralProvider(LLMProvider):
         if self._json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        await _throttle(self._min_interval)
         try:
             resp = await self._client.post("/chat/completions", json=payload)
         except httpx.HTTPError as e:

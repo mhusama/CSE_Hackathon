@@ -156,17 +156,3 @@ def test_retry_after_header_is_read():
     with pytest.raises(RateLimitError) as e:
         call(p)
     assert e.value.retry_after == 2.0
-
-
-def test_calls_are_spaced_by_min_interval(monkeypatch):
-    import time
-    monkeypatch.setenv("MISTRAL_MIN_INTERVAL_SECONDS", "0.3")
-    p = provider(lambda r: reply(json.dumps(ANSWER)))
-
-    async def two():
-        t0 = time.monotonic()
-        await p.interpret_notes(NOTES, 200.0)
-        await p.interpret_notes(NOTES, 200.0)
-        return time.monotonic() - t0
-
-    assert asyncio.run(two()) >= 0.29

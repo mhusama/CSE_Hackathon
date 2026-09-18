@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from app.config import get_settings
-from app.guardrails.validator import find_problems
+from app.guardrails.validator import find_problems, fix_inclusive_end
 from app.llm.base import LLMProvider, RateLimitError
 from app.llm.parser import parse_llm_output
 from app.llm.rules import interpret_with_rules
@@ -51,6 +51,26 @@ class _LRU:
 _SHARED_CACHE = _LRU(get_settings().llm_cache_size)
 
 
+_gate = {"loop": None, "lock": None, "last": 0.0}
+
+
+async def throttle(min_interval: float) -> None:
+    """Space out LLM calls (shared by all models) so bursts do not trigger 429s.
+
+    Runs BEFORE the per-call timeout starts, so waiting in line never counts as a slow call.
+    """
+    if min_interval <= 0:
+        return
+    loop = asyncio.get_running_loop()
+    if _gate["loop"] is not loop:
+        _gate.update(loop=loop, lock=asyncio.Lock(), last=0.0)
+    async with _gate["lock"]:
+        wait = _gate["last"] + min_interval - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _gate["last"] = time.monotonic()
+
+
 class NoteInterpreter:
     def __init__(
         self,
@@ -61,6 +81,7 @@ class NoteInterpreter:
         cache: Optional[_LRU] = None,
         backoff: float = 0.4,
         rate_limit_wait: float = 1.5,
+        min_interval: float = 0.0,
     ):
         self._providers = providers
         self._max_attempts = max(1, max_attempts)
@@ -69,6 +90,7 @@ class NoteInterpreter:
         self._cache = cache
         self._backoff = backoff
         self._rate_limit_wait = rate_limit_wait
+        self._min_interval = min_interval
 
     async def interpret(self, notes: List[str], capacity: float) -> InterpretationResult:
         key = (tuple(notes), round(capacity, 6))
@@ -84,6 +106,10 @@ class NoteInterpreter:
         for name, provider in self._providers:
             feedback: Optional[str] = None
             for attempt in range(self._max_attempts):
+                remaining = deadline - time.monotonic()
+                if remaining < 1.0:
+                    break
+                await throttle(self._min_interval)
                 remaining = deadline - time.monotonic()
                 if remaining < 1.0:
                     break
@@ -124,7 +150,7 @@ class NoteInterpreter:
                 break
 
         if best is not None:
-            return InterpretationResult(best[0], f"llm:{best[2]}")
+            return InterpretationResult(fix_inclusive_end(best[0], notes), f"llm:{best[2]}")
 
         logger.error("All LLM attempts failed; using emergency rule-based parser")
         raw = interpret_with_rules(notes, capacity)
@@ -151,4 +177,5 @@ def build_interpreter(primary: Optional[LLMProvider]) -> NoteInterpreter:
         per_call_timeout=s.llm_timeout_seconds,
         total_budget=s.llm_total_budget_seconds,
         cache=_SHARED_CACHE if real else None,
+        min_interval=s.mistral_min_interval_seconds if real else 0.0,
     )
