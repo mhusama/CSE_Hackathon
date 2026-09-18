@@ -186,7 +186,7 @@ docker run -d -p 8000:8000 -e MISTRAL_API_KEY="your_key_here" --name gridwise gh
 curl http://localhost:8000/health
 ```
 
-The package has to be set to public in the GitHub package settings before anyone else can pull it. To pin a version, use the commit SHA tag from the workflow run instead of `latest`.
+The repo and this package are kept private during the event and made public after the submission deadline, as the rules ask. To pin a version, use the commit SHA tag from the workflow run instead of `latest`.
 
 Building it yourself:
 
@@ -201,9 +201,9 @@ The container binds to `0.0.0.0`, follows `$PORT` and has a health check on `/he
 
 ## Public deployment
 
-**Public base URL:** `https://cse-hackathon-xd9l.onrender.com`
+**Public base URL:** https://cse-hackathon-xd9l.onrender.com
 
-The judge has to reach `GET /health` and `POST /optimize-energy` for the whole evaluation window, so a laptop is not enough. `render.yaml` is a Render blueprint: New, then Blueprint, pick this repo, and add `MISTRAL_API_KEY` in the dashboard. Free Render instances sleep and can take more than a minute to wake up, so use an always-on one. Cloud Run or Railway with one warm instance works too.
+The judge has to reach `GET /health` and `POST /optimize-energy` for the whole evaluation window, so a laptop is not enough. The live service runs on Render as a Docker web service built from this repo, with `MISTRAL_API_KEY` set in the Render dashboard and the health check path set to `/health`. `render.yaml` describes the same setup if you want to redeploy it. Any other host with one warm instance would work too, since free instances that sleep can take more than a minute to wake up.
 
 Test from a different network before you submit:
 
@@ -263,4 +263,4 @@ No key is in the code, the image or the git history. The `.env` file is git-igno
 | httpx | calls to the Mistral API |
 | Mistral AI API | interpreting operator notes |
 | pytest, pytest-asyncio | tests |
-| AI coding assistants | `<list the tools you used>` |
+| Claude, Antigravity (Gemini models), ChatGPT and puku.sh | AI coding assistants used while building, debugging and writing docs |
