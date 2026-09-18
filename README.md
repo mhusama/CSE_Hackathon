@@ -93,33 +93,82 @@ Template is available in `.env.example`.
 - Python 3.10+ (tested on Python 3.11, 3.12, and 3.14)
 - Git
 
-### Step-by-step Setup:
+### Step-by-Step Setup:
 
+#### 1. Clone Repository
 ```bash
-# 1. Clone repository
 git clone <REPO_URL>
 cd CSE_Hackathon
-
-# 2. Create and activate virtual environment
-python -m venv venv
-# On Windows:
-.\venv\Scripts\activate
-# On Linux/macOS:
-source venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment
-cp .env.example .env
-# Edit .env and insert your free Gemini API key:
-# GEMINI_API_KEY=your_actual_key_here
-
-# 5. Run the service
-uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The service will be live at `http://localhost:8000`.
+#### 2. Create and Activate Virtual Environment
+
+- **Windows (PowerShell):**
+  ```powershell
+  python -m venv venv
+  # If PowerShell script execution is restricted, run:
+  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+  .\venv\Scripts\Activate.ps1
+  ```
+
+- **Windows (Command Prompt / CMD):**
+  ```cmd
+  python -m venv venv
+  venv\Scripts\activate.bat
+  ```
+
+- **Linux / macOS:**
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+
+#### 3. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+#### 4. Configure Environment Variables
+Copy the template configuration to create your `.env` file:
+
+- **Windows (PowerShell):**
+  ```powershell
+  Copy-Item .env.example .env
+  ```
+- **Windows (CMD):**
+  ```cmd
+  copy .env.example .env
+  ```
+- **Linux / macOS:**
+  ```bash
+  cp .env.example .env
+  ```
+
+Open `.env` in any text editor and insert your Gemini API key (free from [Google AI Studio](https://aistudio.google.com)):
+```dotenv
+GEMINI_API_KEY=AIzaSy...your_actual_key_here
+LLM_MODEL=gemini-2.0-flash
+PORT=8000
+LOG_LEVEL=info
+```
+
+#### 5. Run the API Server
+
+- **Using Uvicorn CLI:**
+  ```bash
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  ```
+
+- **Or Using Python Module:**
+  ```bash
+  python -m app.main
+  ```
+
+Once started, the API is accessible at:
+- **Service Base URL:** `http://localhost:8000`
+- **Interactive Swagger UI:** `http://localhost:8000/docs`
+- **ReDoc Alternative UI:** `http://localhost:8000/redoc`
+- **Health Readiness Check:** `http://localhost:8000/health`
 
 ---
 
@@ -154,7 +203,63 @@ curl http://localhost:8000/health
 
 ---
 
-## 6. API Endpoints & Usage Examples
+## 6. Hosting for Public / Remote Access from Your Own PC
+
+When running GridWise on your local machine and attempting to access it from the public internet (or external judging harnesses), you may encounter connectivity blocks. Here is how to configure and troubleshoot public access:
+
+### Common Reasons External Access Fails:
+
+1. **Host Binding (`0.0.0.0` vs `127.0.0.1`):**
+   - Ensure the server is listening on `0.0.0.0` (all interfaces), not `127.0.0.1` / `localhost`.
+   - `uvicorn app.main:app --host 0.0.0.0 --port 8000` already binds to all interfaces.
+
+2. **Windows Defender Firewall (Most Common Blocker):**
+   - Windows Firewall blocks unsolicited incoming external connections by default.
+   - Run **PowerShell as Administrator** to allow inbound traffic on port 8000:
+     ```powershell
+     New-NetFirewallRule -DisplayName "FastAPI GridWise Port 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+     ```
+
+3. **ISP Carrier-Grade NAT (CGNAT) & Router Port Forwarding:**
+   - Most residential internet providers use CGNAT. Even if you configure port forwarding on your home Wi-Fi router, inbound traffic from the internet cannot reach your machine directly.
+
+### Recommended Solutions for Public Access:
+
+#### Method A: Free HTTPS Tunnels (Easiest & Most Reliable for Demos / Evaluation)
+Tunnels securely forward public traffic directly to `localhost:8000` without requiring router changes, public IP configuration, or disabling firewalls.
+
+- **Option 1: Cloudflare Tunnel (`cloudflared`) — Free, Fast & Stable**
+  ```bash
+  # Download from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+  cloudflared tunnel --url http://localhost:8000
+  ```
+  *Outputs a public HTTPS URL (e.g. `https://random-name.trycloudflare.com`) that routes directly to your API.*
+
+- **Option 2: ngrok**
+  ```bash
+  # Download from https://ngrok.com
+  ngrok http 8000
+  ```
+  *Provides a public HTTPS URL (e.g. `https://xyz.ngrok-free.app`).*
+
+- **Option 3: LocalTunnel (No account required)**
+  ```bash
+  npx localtunnel --port 8000
+  ```
+
+#### Method B: Direct Port Forwarding (If your router has a dedicated Public IP)
+1. Find your machine's local IP address:
+   ```cmd
+   ipconfig
+   ```
+   *(Look for IPv4 Address, e.g. `192.168.1.150`)*
+2. In your home router settings (`http://192.168.1.1`), open **Port Forwarding**:
+   - Forward external port `8000` to local IP `192.168.1.150:8000` (TCP protocol).
+3. Access via `http://<YOUR_PUBLIC_IP>:8000/health`. Ensure you test from an outside network (such as mobile data).
+
+---
+
+## 7. API Endpoints & Usage Examples
 
 ### 1. Health Endpoint (`GET /health`)
 Readiness check for the judging harness.
@@ -255,7 +360,7 @@ curl -X POST http://localhost:8000/optimize-energy \
 
 ---
 
-## 7. Testing & Verification
+## 8. Testing & Verification
 
 ### Automated Test Suite:
 Run the complete unit and integration test suite:
@@ -301,7 +406,7 @@ Summary: 10/10 PASSED, 0 FAILED.
 
 ---
 
-## 8. External Dependencies & Credits
+## 9. External Dependencies & Credits
 
 - **FastAPI** (`0.115+`) & **Starlette**: High-performance asynchronous REST API framework
 - **Pydantic** (`v2.9+`) & **pydantic-settings**: Strict data validation and schema enforcement
@@ -312,7 +417,7 @@ Summary: 10/10 PASSED, 0 FAILED.
 
 ---
 
-## 9. Limitations & Edge Cases Handled
+## 10. Limitations & Edge Cases Handled
 
 1. **Simultaneous Charging and Discharging**: Linear programming could theoretically set non-zero charge and discharge in degenerate equal-cost scenarios. GridWise automatically nets them prior to building the plan, guaranteeing single-action physical validity.
 2. **LLM Formatting Variance**: If the LLM wraps the response in a container dictionary (e.g. `{"directives": [...]}`), the parser extracts the array automatically. If an individual directive is malformed, guardrails safely clamp values or default to `no_op` rather than crashing the request.
