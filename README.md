@@ -201,14 +201,14 @@ The container binds to `0.0.0.0`, follows `$PORT` and has a health check on `/he
 
 ## Public deployment
 
-**Public base URL:** `<PUBLIC_BASE_URL>`
+**Public base URL:** `https://cse-hackathon-xd9l.onrender.com`
 
 The judge has to reach `GET /health` and `POST /optimize-energy` for the whole evaluation window, so a laptop is not enough. `render.yaml` is a Render blueprint: New, then Blueprint, pick this repo, and add `MISTRAL_API_KEY` in the dashboard. Free Render instances sleep and can take more than a minute to wake up, so use an always-on one. Cloud Run or Railway with one warm instance works too.
 
 Test from a different network before you submit:
 
 ```
-curl https://<PUBLIC_BASE_URL>/health
+curl https://cse-hackathon-xd9l.onrender.com/health
 ```
 
 ## Tests
